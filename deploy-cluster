@@ -1,0 +1,167 @@
+#!/bin/bash
+# @description: Kubernetes deployer
+# @created: 2019-04-22
+# @version: 1.0
+
+# Variable(s)
+
+# Script variable(s)
+PID=$$
+SCRIPTNAME="$(basename $0)"
+WORKER_LIST="worker.list"
+EXTERNAL=false
+MASTER_IP=""
+TOKEN=""
+HASH=""
+
+
+# Functions
+
+function usage {
+cat << EOF
+Usage: $SCRIPTNAME [--external|-e] <CNI>
+--external|-e :	Initizalize Kubernetes on the external network
+				instead of on an internal one
+Available <CNI> plugins:
+	* Calico
+	* Cilium
+	* Flannel
+	* WeaveNet
+EOF
+}
+
+## Send error messages to stderr
+function echo_err {
+	echo "Error: $@" >&2
+}
+
+function wait_for_worker {
+  while [[ "$(kubectl get nodes | grep Ready | grep none | wc -l)" -lt 1 ]];
+  do
+    sleep 1
+  done
+}
+
+function wait_for_podnetwork {
+  #podnetwork should be running on the master and at least one worker node
+  while [[ "$(kubectl get pods -n kube-system | grep weave-net | grep Running | wc -l)" -lt 2 ]];
+  do
+    sleep 1
+  done
+}
+
+# Preflight checks
+
+## Check file from parameters
+if [ ! -f $WORKER_LIST ]; then
+	echo_err "Worker list file ($WORKER_LIST) not exists."
+	exit 1
+fi
+
+## Check the file contents
+if [ ! -s $WORKER_LIST ]; then
+	echo_err "Worker list file ($WORKER_LIST) is empty."
+	exit 1
+fi
+
+## Create array from file
+readarray WORKER < $WORKER_LIST
+
+## Check for argument
+if [ "$#" -lt 1 ]; then
+	echo_err "Missing CNI plugin name as an argument."
+	exit 1
+fi
+
+## Check for help parameter
+for i in "$@"
+do
+	### Make the letters of the argument lowercase
+    i=$(tr '[:upper:]' '[:lower:]' <<< $i)
+	case $i in
+		### Print out help message
+		help|h|-h|--help)	usage; exit 0;;
+	esac
+done
+
+## Check parameters and setup variables for Kubernetes installation
+for i in "$@"
+do
+	### Make the letters of the argument lowercase
+	i=$(tr '[:upper:]' '[:lower:]' <<< $i)
+	case $i in
+		### Kubernetes network usage (internal|external)
+		-e|--external) echo "# Kubernetes will be set up for external network. #";
+			EXTERNAL=false;;
+
+		### Set parameters for Calico
+		calico)	echo "[CNI] Calico selected...";
+			CNI="calico";
+			POD_NETWORK="192.168.0.0/16";;
+
+		### Set parameters for Cilium
+		cilium)	echo "[CNI] Cilium selected...";
+			CNI="cilium";
+			POD_NETWORK="";;
+
+		### Set parameters for Flannel
+		flannel) echo "[CNI] Flannel selected...";
+			CNI="flannel";
+			POD_NETWORK="10.244.0.0/16";;
+
+		### Set parameters for WeaveNet...
+		weavenet) echo "[CNI] WeaveNet selected...";
+			CNI="weavenet";
+			POD_NETWORK="";;
+
+		### Wrong argument, print error message
+		*)    	echo_err "Unkown parameter: $i option is not valid!";
+			exit 1;;
+	esac
+done
+
+## Get Master node IP address
+if [ $EXTERNAL ]; then
+	MASTER_IP=$(grep -oP '(?<=src )[^ ]*' \
+					<(grep \
+						-f <(ls -l /sys/class/net | grep pci | awk '{print $9}') \
+						<(ip ro sh) |
+					grep -v $(ip ro sh | grep default | awk '{print $5}')) |
+				head -1)
+	if [ "x$MASTER_IP" == "x" ]; then
+		EXTERNAL=false
+		MASTER_IP=$(grep -oP '(?<=src )[^ ]*' <(ip ro sh | grep default))
+	fi
+else
+	MASTER_IP=$(grep -oP '(?<=src )[^ ]*' <(ip ro sh | grep default))
+fi
+
+## Setup Kubernetes
+./deploy/kubernetes_install.sh master $EXTERNAL $MASTER_IP $POD_NETWORK
+
+## Install CNI Plugin
+./deploy/${CNI}_setup.sh
+
+TOKEN=$(kubeadm token list | tail -n 1 | cut -d ' ' -f 1)
+HASH=sha256:$(openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt |
+				openssl rsa -pubin -outform der 2>/dev/null |
+				openssl dgst -sha256 -hex |
+				sed 's/^.* //')
+
+#FIXME Do I need local docker-registry?
+#./deploy/docker_registry_setup.sh $IP:5000
+
+# Join the worker nodes
+for WORKERNAME in ${WORKER[@]}; do
+	echo "[worker:$WORKERNAME] Deploying..."
+	ssh $WORKERNAME -o "StrictHostKeyChecking no" \
+			"bash -s" < ./deploy/kubernetes_install.sh worker $EXTERNAL $MASTER_IP:6443 $TOKEN $HASH
+
+	#FIXME Do I need to wait for the worker?
+#	wait_for_worker
+
+	#FIXME Do I need local docker-registry?
+#	ssh $WORKERNAME -o "StrictHostKeyChecking no" "bash -s" < ./deploy/docker_registry_setup.sh $MASTER_IP:5000
+
+	echo "[worker:$WORKERNAME] Deployment is completed."
+done
