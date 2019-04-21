@@ -1,4 +1,4 @@
-# Kubernetes Cluster Deployer and Withdrawer
+# Kubernetes Cluster Deployment
 
 ****
 
@@ -21,7 +21,7 @@ Create a `worker.list` file and add the hostname or the IP address of the worker
 as you can see in the example file.
 
 ### Deploying Kubernetes Cluster
-To install the cluster run the `./cluster-deploy [--external|-e] <CNI>` command. A Kubernetes CNI plugin name
+To install the cluster run the `./deploy-cluster- [--external|-e] <CNI>` command. A Kubernetes CNI plugin name
 must be given as an argument. If you give the word `help` as an argument, you will get the script usage
 with the available CNI plugins.
 
